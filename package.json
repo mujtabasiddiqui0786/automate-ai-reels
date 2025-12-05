@@ -1,0 +1,26 @@
+{
+  "name": "automate-reels",
+  "version": "1.0.0",
+  "description": "Automated satisfying loop video generation and upload system for YouTube Shorts, Instagram Reels, and TikTok",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "keywords": [
+    "video",
+    "automation",
+    "youtube",
+    "instagram",
+    "tiktok",
+    "reels",
+    "shorts",
+    "ffmpeg"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
+
