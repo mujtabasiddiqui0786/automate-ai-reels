@@ -7,6 +7,8 @@ const https = require('https');
 const fs = require('fs');
 const querystring = require('querystring');
 const config = require('../config');
+const { withRetry } = require('../utils/retry');
+const { checkQuotaAndIncrement } = require('./quota');
 
 /**
  * Gets a new access token from refresh token using OAuth 2.0
@@ -14,7 +16,7 @@ const config = require('../config');
  * @throws {Error} If token refresh fails
  */
 async function getAccessTokenFromRefreshToken() {
-  return new Promise((resolve, reject) => {
+  return withRetry(() => new Promise((resolve, reject) => {
     if (!config.youtube.clientId || !config.youtube.clientSecret || !config.youtube.refreshToken) {
       reject(new Error('YouTube OAuth credentials not configured'));
       return;
@@ -75,7 +77,7 @@ async function getAccessTokenFromRefreshToken() {
 
     req.write(postData);
     req.end();
-  });
+  }), { retries: 2, baseDelayMs: 1000 });
 }
 
 /**
@@ -89,7 +91,7 @@ async function getAccessTokenFromRefreshToken() {
  * @throws {Error} If upload initiation fails
  */
 async function initiateResumableUpload(accessToken, metadata) {
-  return new Promise((resolve, reject) => {
+  return withRetry(() => new Promise((resolve, reject) => {
     // YouTube API requires video metadata in JSON format
     const videoMetadata = {
       snippet: {
@@ -166,7 +168,7 @@ async function initiateResumableUpload(accessToken, metadata) {
 
     req.write(metadataString);
     req.end();
-  });
+  }), { retries: 2, baseDelayMs: 1000 });
 }
 
 /**
@@ -180,6 +182,9 @@ async function initiateResumableUpload(accessToken, metadata) {
  * @throws {Error} If upload fails
  */
 async function uploadVideoToYouTube(filePath, metadata) {
+  // Quota guard
+  checkQuotaAndIncrement('youtube');
+
   // Validate file exists
   if (!fs.existsSync(filePath)) {
     throw new Error(`Video file not found: ${filePath}`);
@@ -202,107 +207,109 @@ async function uploadVideoToYouTube(filePath, metadata) {
     let uploadedBytes = 0;
     let videoId = null;
 
-    function uploadChunk(startByte) {
-      const endByte = Math.min(startByte + chunkSize - 1, fileSize - 1);
-      const contentLength = endByte - startByte + 1;
+    function sendChunkAttempt(startByte) {
+      return new Promise((resolveChunk, rejectChunk) => {
+        const endByte = Math.min(startByte + chunkSize - 1, fileSize - 1);
+        const contentLength = endByte - startByte + 1;
 
-      // Parse upload URL
-      const url = new URL(uploadUrl);
-      const options = {
-        hostname: url.hostname,
-        port: 443,
-        path: url.pathname + url.search,
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'video/*',
-          'Content-Length': contentLength.toString(),
-          'Content-Range': `bytes ${startByte}-${endByte}/${fileSize}`
-        },
-        timeout: 300000 // 5 minutes per chunk
-      };
+        // Parse upload URL
+        const url = new URL(uploadUrl);
+        const options = {
+          hostname: url.hostname,
+          port: 443,
+          path: url.pathname + url.search,
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'video/*',
+            'Content-Length': contentLength.toString(),
+            'Content-Range': `bytes ${startByte}-${endByte}/${fileSize}`
+          },
+          timeout: 300000 // 5 minutes per chunk
+        };
 
-      const req = https.request(options, (res) => {
-        let data = '';
+        const req = https.request(options, (res) => {
+          let data = '';
 
-        res.on('data', (chunk) => {
-          data += chunk;
-        });
+          res.on('data', (chunk) => {
+            data += chunk;
+          });
 
-        res.on('end', () => {
-          if (res.statusCode === 200 || res.statusCode === 201) {
-            // Upload complete
-            try {
-              const response = JSON.parse(data);
-              videoId = response.id;
-              resolve({ videoId, videoUrl: `https://www.youtube.com/watch?v=${videoId}` });
-            } catch (error) {
-              // Sometimes YouTube returns empty body on success
-              // Try to extract video ID from response or Location header
-              if (res.headers.location) {
-                const match = res.headers.location.match(/[?&]id=([^&]+)/);
-                if (match) {
-                  videoId = match[1];
-                  resolve({ videoId, videoUrl: `https://www.youtube.com/watch?v=${videoId}` });
-                } else {
-                  resolve({ videoId: 'unknown', videoUrl: 'https://www.youtube.com' });
+          res.on('end', () => {
+            if (res.statusCode === 200 || res.statusCode === 201) {
+              try {
+                const response = JSON.parse(data);
+                videoId = response.id;
+                return resolveChunk({ done: true, videoId });
+              } catch (error) {
+                if (res.headers.location) {
+                  const match = res.headers.location.match(/[?&]id=([^&]+)/);
+                  if (match) {
+                    videoId = match[1];
+                    return resolveChunk({ done: true, videoId });
+                  }
                 }
-              } else {
-                resolve({ videoId: 'unknown', videoUrl: 'https://www.youtube.com' });
+                return resolveChunk({ done: true, videoId: 'unknown' });
               }
-            }
-          } else if (res.statusCode === 308) {
-            // Resume upload - get next byte range from Range header
-            const rangeHeader = res.headers.range;
-            if (rangeHeader) {
-              const match = rangeHeader.match(/bytes=0-(\d+)/);
-              if (match) {
-                uploadedBytes = parseInt(match[1], 10) + 1;
-                uploadChunk(uploadedBytes);
-              } else {
-                reject(new Error('Invalid Range header in resume response'));
+            } else if (res.statusCode === 308) {
+              const rangeHeader = res.headers.range;
+              if (rangeHeader) {
+                const match = rangeHeader.match(/bytes=0-(\\d+)/);
+                if (match) {
+                  uploadedBytes = parseInt(match[1], 10) + 1;
+                  return resolveChunk({ done: false, nextStart: uploadedBytes });
+                }
               }
-            } else {
-              // No range header, continue from where we left off
               uploadedBytes = endByte + 1;
               if (uploadedBytes < fileSize) {
-                uploadChunk(uploadedBytes);
-              } else {
-                reject(new Error('Upload incomplete but no more data to send'));
+                return resolveChunk({ done: false, nextStart: uploadedBytes });
               }
+              return rejectChunk(new Error('Upload incomplete but no more data to send'));
+            } else {
+              rejectChunk(new Error(`Upload failed with status ${res.statusCode}: ${data}`));
             }
-          } else {
-            reject(new Error(`Upload failed with status ${res.statusCode}: ${data}`));
-          }
+          });
+        });
+
+        req.on('error', (error) => {
+          rejectChunk(new Error(`Upload request failed: ${error.message}`));
+        });
+
+        req.on('timeout', () => {
+          req.destroy();
+          rejectChunk(new Error('Upload request timed out'));
+        });
+
+        const chunkStream = fs.createReadStream(filePath, {
+          start: startByte,
+          end: endByte
+        });
+
+        chunkStream.on('data', (chunk) => {
+          req.write(chunk);
+        });
+
+        chunkStream.on('end', () => {
+          req.end();
+        });
+
+        chunkStream.on('error', (error) => {
+          req.destroy();
+          rejectChunk(new Error(`File read error: ${error.message}`));
         });
       });
+    }
 
-      req.on('error', (error) => {
-        reject(new Error(`Upload request failed: ${error.message}`));
-      });
-
-      req.on('timeout', () => {
-        req.destroy();
-        reject(new Error('Upload request timed out'));
-      });
-
-      // Read and send chunk
-      const chunkStream = fs.createReadStream(filePath, {
-        start: startByte,
-        end: endByte
-      });
-
-      chunkStream.on('data', (chunk) => {
-        req.write(chunk);
-      });
-
-      chunkStream.on('end', () => {
-        req.end();
-      });
-
-      chunkStream.on('error', (error) => {
-        req.destroy();
-        reject(new Error(`File read error: ${error.message}`));
-      });
+    function uploadChunk(startByte) {
+      return withRetry(() => sendChunkAttempt(startByte), { retries: 2, baseDelayMs: 1000 })
+        .then((result) => {
+          if (result.done) {
+            resolve({ videoId, videoUrl: `https://www.youtube.com/watch?v=${videoId}` });
+          } else if (result.nextStart != null) {
+            return uploadChunk(result.nextStart);
+          }
+          return null;
+        })
+        .catch((err) => reject(err));
     }
 
     // Start upload from beginning

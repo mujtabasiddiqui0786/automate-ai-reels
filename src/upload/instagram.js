@@ -7,6 +7,8 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const config = require('../config');
+const { withRetry } = require('../utils/retry');
+const { checkQuotaAndIncrement } = require('./quota');
 
 /**
  * Uploads video file to Instagram and returns the video URL
@@ -39,7 +41,7 @@ async function uploadVideoFile(filePath, staticBaseUrl) {
  * @throws {Error} If container creation fails
  */
 async function createReelContainer(videoUrl, caption) {
-  return new Promise((resolve, reject) => {
+  return withRetry(() => new Promise((resolve, reject) => {
     if (!config.instagram.accessToken || !config.instagram.userId) {
       reject(new Error('Instagram credentials not configured'));
       return;
@@ -100,7 +102,7 @@ async function createReelContainer(videoUrl, caption) {
 
     req.write(postData);
     req.end();
-  });
+  }), { retries: 2, baseDelayMs: 1000 });
 }
 
 /**
@@ -110,7 +112,7 @@ async function createReelContainer(videoUrl, caption) {
  * @throws {Error} If status check fails
  */
 async function checkContainerStatus(containerId) {
-  return new Promise((resolve, reject) => {
+  return withRetry(() => new Promise((resolve, reject) => {
     if (!config.instagram.accessToken) {
       reject(new Error('Instagram access token not configured'));
       return;
@@ -155,7 +157,7 @@ async function checkContainerStatus(containerId) {
     });
 
     req.end();
-  });
+  }), { retries: 2, baseDelayMs: 1000 });
 }
 
 /**
@@ -202,7 +204,7 @@ async function waitForContainerReady(containerId, maxWaitTime = 300000, checkInt
  * @throws {Error} If publishing fails
  */
 async function publishReel(containerId) {
-  return new Promise((resolve, reject) => {
+  return withRetry(() => new Promise((resolve, reject) => {
     if (!config.instagram.accessToken || !config.instagram.userId) {
       reject(new Error('Instagram credentials not configured'));
       return;
@@ -263,7 +265,7 @@ async function publishReel(containerId) {
 
     req.write(postData);
     req.end();
-  });
+  }), { retries: 2, baseDelayMs: 1000 });
 }
 
 /**
@@ -281,6 +283,9 @@ async function uploadReel(filePath, options = {}) {
     caption,
     staticBaseUrl = config.paths.staticBaseUrl
   } = options;
+
+  // Quota guard
+  checkQuotaAndIncrement('instagram');
 
   if (!caption) {
     throw new Error('Caption is required for Instagram Reel');

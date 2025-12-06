@@ -11,8 +11,46 @@ const {
   generateSeedValue,
   generateSeedFloat,
   getRandomBaseClip,
-  getVideoDuration
+  getVideoDuration,
+  generateThumbnail
 } = require('./utils');
+
+// Style presets controlling filter parameter ranges
+const STYLES = {
+  default: {
+    hueRange: [-30, 30],
+    saturationRange: [0.8, 1.3],
+    brightnessRange: [0.9, 1.1],
+    speedRange: [0.8, 1.2],
+    zoomRange: [1.0, 1.2]
+  },
+  calm: {
+    hueRange: [-10, 10],
+    saturationRange: [0.8, 1.0],
+    brightnessRange: [0.95, 1.05],
+    speedRange: [0.8, 1.0],
+    zoomRange: [1.0, 1.1]
+  },
+  neon: {
+    hueRange: [20, 60],
+    saturationRange: [1.1, 1.4],
+    brightnessRange: [1.0, 1.2],
+    speedRange: [1.0, 1.2],
+    zoomRange: [1.0, 1.2]
+  },
+  vintage: {
+    hueRange: [-20, 20],
+    saturationRange: [0.7, 0.95],
+    brightnessRange: [0.9, 1.0],
+    speedRange: [0.9, 1.1],
+    zoomRange: [1.0, 1.1]
+  }
+};
+
+function getStyleConfig(style) {
+  if (style && STYLES[style]) return STYLES[style];
+  return STYLES.default;
+}
 
 /**
  * Generates a satisfying loop video with ffmpeg transformations
@@ -27,8 +65,12 @@ async function generateLoop(options = {}) {
   const {
     style = 'default',
     durationSeconds = 25,
-    seed = Date.now()
+    seed = Date.now(),
+    perfectLoop = false,
+    fadeAudio = false
   } = options;
+
+  const styleConfig = getStyleConfig(style);
 
   // Get a base clip (deterministic if seed provided)
   const baseClipPath = await getRandomBaseClip(config.paths.baseVideoDir, seed);
@@ -37,14 +79,17 @@ async function generateLoop(options = {}) {
   const timestamp = Date.now();
   const filename = `loop_${timestamp}_${seed}.mp4`;
   const outputPath = path.join(config.paths.outputVideoDir, filename);
+  const thumbnailsDir = path.join(process.cwd(), 'videos', 'thumbnails');
+  const thumbnailFilename = filename.replace(/\\.mp4$/i, '.jpg');
+  const thumbnailPath = path.join(thumbnailsDir, thumbnailFilename);
 
-  // Generate deterministic parameters from seed
-  const hueShift = generateSeedValue(seed, -30, 30); // Hue shift in degrees (-30 to +30)
-  const saturation = generateSeedFloat(seed + 1, 0.8, 1.3); // Saturation multiplier
-  const brightness = generateSeedFloat(seed + 2, 0.9, 1.1); // Brightness adjustment
-  const speedMultiplier = generateSeedFloat(seed + 3, 0.8, 1.2); // Playback speed (0.8x to 1.2x)
+  // Generate deterministic parameters from seed based on style ranges
+  const hueShift = Math.round(generateSeedFloat(seed, styleConfig.hueRange[0], styleConfig.hueRange[1]));
+  const saturation = generateSeedFloat(seed + 1, styleConfig.saturationRange[0], styleConfig.saturationRange[1]);
+  const brightness = generateSeedFloat(seed + 2, styleConfig.brightnessRange[0], styleConfig.brightnessRange[1]);
+  const speedMultiplier = generateSeedFloat(seed + 3, styleConfig.speedRange[0], styleConfig.speedRange[1]);
   const mirror = generateSeedValue(seed + 4, 0, 1) === 1; // Random mirroring
-  const scale = generateSeedFloat(seed + 5, 1.0, 1.2); // Scale factor for zoom effect
+  const scale = generateSeedFloat(seed + 5, styleConfig.zoomRange[0], styleConfig.zoomRange[1]); // Scale factor for zoom effect
 
   // Get base clip duration
   const baseDuration = await getVideoDuration(baseClipPath);
@@ -54,13 +99,16 @@ async function generateLoop(options = {}) {
   const loopsNeeded = Math.max(1, Math.ceil(durationSeconds / effectiveBaseDuration) + 1); // +1 for safety
 
   // Build filter complex with proper syntax
-  const filterComplex = buildFilterComplex({
+  const filterResult = buildFilterComplex({
     hueShift,
     saturation,
     brightness,
     speedMultiplier,
     mirror,
-    scale
+    scale,
+    perfectLoop,
+    fadeAudio,
+    targetDuration: durationSeconds
   });
 
   // Build ffmpeg command with stream_loop for input looping
@@ -68,9 +116,9 @@ async function generateLoop(options = {}) {
   const ffmpegArgs = [
     '-stream_loop', loopsNeeded.toString(),
     '-i', baseClipPath,
-    '-filter_complex', filterComplex,
-    '-map', '[vout]',
-    '-map', '[aout]',
+    '-filter_complex', filterResult.filter,
+    '-map', `[${filterResult.videoOut}]`,
+    '-map', `[${filterResult.audioOut}]`,
     '-c:v', 'libx264',
     '-preset', 'medium',
     '-crf', '23',
@@ -93,12 +141,24 @@ async function generateLoop(options = {}) {
     throw new Error('Video generation completed but output file not found');
   }
 
+  // Generate thumbnail at mid-point
+  const thumbTimestamp = Math.max(0, durationSeconds / 2);
+  try {
+    await generateThumbnail(outputPath, thumbnailPath, thumbTimestamp);
+  } catch (thumbErr) {
+    // Non-fatal thumbnail error
+    console.warn('Thumbnail generation failed:', thumbErr.message);
+  }
+
   // Generate public URL
   const publicUrl = `${config.paths.staticBaseUrl}/videos/${filename}`;
+  const thumbnailUrl = `${config.paths.staticBaseUrl}/thumbnails/${thumbnailFilename}`;
 
   return {
     filePath: outputPath,
     publicUrl,
+    thumbnailPath,
+    thumbnailUrl,
     meta: {
       style,
       durationSeconds,
@@ -109,7 +169,9 @@ async function generateLoop(options = {}) {
       brightness: brightness.toFixed(2),
       speedMultiplier: speedMultiplier.toFixed(2),
       mirror,
-      scale: scale.toFixed(2)
+      scale: scale.toFixed(2),
+      perfectLoop,
+      fadeAudio
     }
   };
 }
@@ -118,7 +180,7 @@ async function generateLoop(options = {}) {
  * Builds ffmpeg filter_complex string for video transformations
  * Uses proper filter_complex syntax with labeled inputs/outputs
  * @param {Object} params - Filter parameters
- * @returns {string} Filter complex string
+ * @returns {{filter: string, videoOut: string, audioOut: string}} Filter complex result
  */
 function buildFilterComplex(params) {
   const {
@@ -127,10 +189,15 @@ function buildFilterComplex(params) {
     brightness,
     speedMultiplier,
     mirror,
-    scale
+    scale,
+    perfectLoop,
+    fadeAudio,
+    targetDuration
   } = params;
 
   const filterParts = [];
+  let videoOutputLabel = 'vout';
+  let audioOutputLabel = 'aout';
 
   // Start with video input [0:v]
   // Step 1: Scale and crop to 1080x1920 (9:16 aspect ratio)
@@ -166,9 +233,16 @@ function buildFilterComplex(params) {
   // setpts=PTS/speed makes video play 'speed' times faster
   const speedLabel = currentLabel === 'v2' ? 'v3' : 'v4';
   if (speedMultiplier !== 1.0) {
-    filterParts.push(`[${currentLabel}]setpts=PTS/${speedMultiplier}[vout]`);
+    filterParts.push(`[${currentLabel}]setpts=PTS/${speedMultiplier}[${videoOutputLabel}]`);
   } else {
-    filterParts.push(`[${currentLabel}]null[vout]`);
+    filterParts.push(`[${currentLabel}]null[${videoOutputLabel}]`);
+  }
+
+  // Perfect loop: forward + reverse concat
+  if (perfectLoop) {
+    const loopLabel = 'vloop';
+    filterParts.push(`[${videoOutputLabel}]split[vfwd][vtmp];[vtmp]reverse[vrev];[vfwd][vrev]concat=n=2:v=1:a=0[${loopLabel}]`);
+    videoOutputLabel = loopLabel;
   }
 
   // Audio processing: speed adjustment with atempo
@@ -189,7 +263,18 @@ function buildFilterComplex(params) {
     filterParts.push('[0:a]anull[aout]');
   }
 
-  return filterParts.join(';');
+  // Audio fade in/out if enabled
+  if (fadeAudio && targetDuration) {
+    // Apply fade to audio output
+    filterParts.push(`[${audioOutputLabel}]afade=t=in:st=0:d=0.5,afade=t=out:st=${Math.max(0, targetDuration - 0.5)}:d=0.5[afaded]`);
+    audioOutputLabel = 'afaded';
+  }
+
+  return {
+    filter: filterParts.join(';'),
+    videoOut: videoOutputLabel,
+    audioOut: audioOutputLabel
+  };
 }
 
 

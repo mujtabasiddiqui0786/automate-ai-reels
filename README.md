@@ -232,6 +232,10 @@ Upload or export a video to TikTok.
 
 Serve static video files. Used internally by Instagram upload process.
 
+### GET /thumbnails/*
+
+Serve generated thumbnails for videos.
+
 ### GET /health
 
 Health check endpoint.
@@ -243,6 +247,80 @@ Health check endpoint.
   "timestamp": "2024-01-01T00:00:00.000Z"
 }
 ```
+
+### POST /pipeline/generate-upload
+
+Run generation + uploads in one call with job tracking.
+
+**Request:**
+```json
+{
+  "generation": {
+    "durationSeconds": 20,
+    "seed": 12345,
+    "style": "calm",
+    "perfectLoop": true,
+    "fadeAudio": true
+  },
+  "platforms": {
+    "youtube": { "enabled": true, "titleOverride": "Optional title" },
+    "instagram": { "enabled": true },
+    "tiktok": { "enabled": true }
+  },
+  "metadata": {
+    "theme": "relax",
+    "keywords": ["lofi", "rain", "study"],
+    "variants": 1
+  },
+  "trackJob": true,
+  "callbackUrl": "https://example.com/webhook"
+}
+```
+
+**Response:**
+```json
+{
+  "jobId": "20251206-abc123",
+  "status": "success",
+  "output": {
+    "video": { "filePath": "...", "publicUrl": "...", "thumbnailUrl": "..." },
+    "metadata": { "youtubeTitle": "...", "variants": [...] },
+    "youtube": { "videoId": "..." },
+    "instagram": { "reelId": "..." },
+    "tiktok": { "localPath": "..." }
+  }
+}
+```
+
+### GET /jobs/:id
+Retrieve job status and output.
+
+### GET /jobs/:id/log
+Retrieve job-specific logs (if present).
+
+### POST /maintenance/cleanup
+Cleanup old generated files (requires `MAINTENANCE_TOKEN`).
+
+---
+
+## New Options & Styles (Phase 2)
+
+- **Styles**: `default`, `calm`, `neon`, `vintage` (affect hue, saturation, brightness, speed, zoom)
+- **perfectLoop**: forward+reverse concat for seamless loops
+- **fadeAudio**: fade in/out audio tails
+- **Themes**: `relax`, `study`, `nature`, `tech`, `abstract` (metadata branding)
+- **Keywords**: inject into tags/hashtags
+- **Variants**: request multiple metadata variants
+- **Thumbnails**: auto-generated to `videos/thumbnails/`
+
+## Job Tracking
+- Add `trackJob: true` (or `?track=true`) to generation/upload endpoints.
+- Jobs stored under `jobs/` with statuses and steps.
+- Poll via `GET /jobs/:id`.
+
+## Quotas & Maintenance
+- Set daily upload caps: `YOUTUBE_MAX_UPLOADS_PER_DAY`, `IG_MAX_UPLOADS_PER_DAY`, `TIKTOK_MAX_UPLOADS_PER_DAY`.
+- Cleanup old files via `POST /maintenance/cleanup` with `MAINTENANCE_TOKEN`.
 
 ## n8n Integration
 

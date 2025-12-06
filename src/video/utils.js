@@ -6,6 +6,7 @@
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const { spawn } = require('child_process');
 
 /**
  * Executes an ffmpeg command and returns a promise
@@ -188,12 +189,49 @@ async function getVideoDuration(filePath) {
   });
 }
 
+/**
+ * Generate a thumbnail image from a video at a specific timestamp.
+ * @param {string} inputPath - Path to input video
+ * @param {string} outputPath - Path to output image (e.g., .jpg)
+ * @param {number} timestampSeconds - Timestamp to capture frame
+ * @returns {Promise<void>}
+ */
+async function generateThumbnail(inputPath, outputPath, timestampSeconds) {
+  return new Promise((resolve, reject) => {
+    const dir = path.dirname(outputPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    const args = [
+      '-ss', String(timestampSeconds),
+      '-i', inputPath,
+      '-vframes', '1',
+      '-q:v', '2',
+      outputPath
+    ];
+
+    const ff = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+
+    ff.stderr.on('data', (d) => { stderr += d.toString(); });
+
+    ff.on('close', (code) => {
+      if (code === 0) return resolve();
+      reject(new Error(`ffmpeg thumbnail failed with code ${code}: ${stderr}`));
+    });
+
+    ff.on('error', (err) => reject(err));
+  });
+}
+
 module.exports = {
   executeFFmpeg,
   generateSeedValue,
   generateSeedFloat,
   getRandomBaseClip,
   validateVideoFile,
-  getVideoDuration
+  getVideoDuration,
+  generateThumbnail
 };
 

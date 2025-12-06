@@ -8,6 +8,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const config = require('../config');
+const { checkQuotaAndIncrement } = require('./quota');
 
 /**
  * Uploads video to TikTok using the TikTok Posting API
@@ -108,6 +109,9 @@ async function uploadTikTok(filePath, options = {}) {
   if (!caption) {
     throw new Error('Caption is required for TikTok video');
   }
+
+  // Quota guard
+  checkQuotaAndIncrement('tiktok');
 
   if (config.tiktok.enabled) {
     try {

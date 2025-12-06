@@ -5,6 +5,50 @@
 
 const { generateSeedValue } = require('../video/utils');
 
+const THEMES = {
+  default: {
+    emojis: ['✨', '🎧', '🌀'],
+    hashtags: ['satisfying', 'loop', 'calm', 'relaxing', 'asmr'],
+    titleTemplates: [],
+    captionTemplates: []
+  },
+  relax: {
+    emojis: ['😌', '🌙', '🎧'],
+    hashtags: ['relax', 'chill', 'calm', 'soothing', 'sleep'],
+    titleTemplates: ['Relaxing night vibes', 'Calm beats for your mind', 'Deep calm loop'],
+    captionTemplates: ['Relax and unwind with this calming loop', 'Night vibes for instant calm', 'Lo-fi chill loop for your mind']
+  },
+  study: {
+    emojis: ['📚', '🎧', '🧠'],
+    hashtags: ['studywithme', 'lofi', 'focus', 'deepwork', 'productivity'],
+    titleTemplates: ['Lo-fi for deep focus', 'Study session background', 'Focus loop for productivity'],
+    captionTemplates: ['Stay focused with this loop', 'Background vibes for deep work', 'Keep studying, we got the beats']
+  },
+  nature: {
+    emojis: ['🌿', '🌊', '🌅'],
+    hashtags: ['nature', 'calm', 'serene', 'ambient', 'green'],
+    titleTemplates: ['Nature inspired calm loop', 'Serene ambient motion', 'Flowing nature vibes'],
+    captionTemplates: ['Nature flow to calm your mind', 'Ambient greenery loop', 'Serene vibes on repeat']
+  },
+  tech: {
+    emojis: ['💻', '🛰️', '🧬'],
+    hashtags: ['tech', 'future', 'aesthetic', 'digital', 'synth'],
+    titleTemplates: ['Futuristic loop aesthetic', 'Digital pulse loop', 'Tech-inspired visuals'],
+    captionTemplates: ['Neon tech loop for your feed', 'Future aesthetic on repeat', 'Digital vibes rolling']
+  },
+  abstract: {
+    emojis: ['🎨', '🌀', '🧊'],
+    hashtags: ['abstract', 'art', 'motion', 'colors', 'aesthetic'],
+    titleTemplates: ['Abstract motion art loop', 'Colorful infinite flow', 'Hypnotic abstract loop'],
+    captionTemplates: ['Abstract art in motion', 'Colors that flow forever', 'Hypnotic shapes on repeat']
+  }
+};
+
+function pickTheme(theme) {
+  if (theme && THEMES[theme]) return THEMES[theme];
+  return THEMES.default;
+}
+
 /**
  * Generates platform-specific metadata for videos
  * @param {Object} metaInput - Input metadata
@@ -17,8 +61,13 @@ function generateMetadata(metaInput = {}) {
   const {
     style = 'default',
     seed = Date.now(),
-    colorProfile = 'vibrant'
+    colorProfile = 'vibrant',
+    theme = 'default',
+    keywords = [],
+    variants = 1
   } = metaInput;
+
+  const themeConfig = pickTheme(theme);
 
   // Title templates for YouTube
   const titleTemplates = [
@@ -77,37 +126,67 @@ Watch it again and again - you'll never get tired of this satisfying loop!
     ['satisfying', 'loop', 'infinity loop', 'relaxing', 'ASMR', 'satisfying videos', 'loop video', 'meditation', 'zen', 'calm', 'peaceful', 'hypnotic', 'mesmerizing', 'oddly satisfying', 'satisfying loop', 'infinite loop', 'satisfying content', 'relaxing video', 'stress relief', 'mindfulness', 'satisfying loop video', 'perfect loop', 'endless loop']
   ];
 
-  // Select templates deterministically based on seed
-  const titleIndex = generateSeedValue(seed, 0, titleTemplates.length - 1);
-  const descIndex = generateSeedValue(seed + 1, 0, descriptionTemplates.length - 1);
-  const instaIndex = generateSeedValue(seed + 2, 0, instagramCaptionTemplates.length - 1);
-  const tiktokIndex = generateSeedValue(seed + 3, 0, tiktokCaptionTemplates.length - 1);
-  const tagIndex = generateSeedValue(seed + 4, 0, tagSets.length - 1);
-  const num = generateSeedValue(seed + 5, 1, 999);
+  function buildVariant(variantSeed) {
+    // Select templates deterministically based on seed
+    const titlePool = themeConfig.titleTemplates && themeConfig.titleTemplates.length > 0 ? themeConfig.titleTemplates : titleTemplates;
+    const captionPoolIG = themeConfig.captionTemplates && themeConfig.captionTemplates.length > 0 ? themeConfig.captionTemplates : instagramCaptionTemplates;
+    const captionPoolTT = themeConfig.captionTemplates && themeConfig.captionTemplates.length > 0 ? themeConfig.captionTemplates : tiktokCaptionTemplates;
 
-  // Replace placeholders in templates
-  const youtubeTitle = titleTemplates[titleIndex]
-    .replace('{style}', style)
-    .replace('{num}', num.toString());
+    const titleIndex = generateSeedValue(variantSeed, 0, titlePool.length - 1);
+    const descIndex = generateSeedValue(variantSeed + 1, 0, descriptionTemplates.length - 1);
+    const instaIndex = generateSeedValue(variantSeed + 2, 0, captionPoolIG.length - 1);
+    const tiktokIndex = generateSeedValue(variantSeed + 3, 0, captionPoolTT.length - 1);
+    const tagIndex = generateSeedValue(variantSeed + 4, 0, tagSets.length - 1);
+    const num = generateSeedValue(variantSeed + 5, 1, 999);
 
-  const youtubeDescription = descriptionTemplates[descIndex]
-    .replace(/{style}/g, style);
+    const youtubeTitle = titlePool[titleIndex]
+      .replace('{style}', style)
+      .replace('{num}', num.toString());
 
-  const instagramCaption = instagramCaptionTemplates[instaIndex]
-    .replace(/{style}/g, style);
+    const youtubeDescription = descriptionTemplates[descIndex]
+      .replace(/{style}/g, style);
 
-  const tiktokCaption = tiktokCaptionTemplates[tiktokIndex]
-    .replace(/{style}/g, style);
+    const baseTags = tagSets[tagIndex];
+    const keywordTags = Array.isArray(keywords) ? keywords.map((k) => String(k).toLowerCase()) : [];
+    const themeTags = themeConfig.hashtags || [];
+    const youtubeTags = Array.from(new Set([...baseTags, ...themeTags, ...keywordTags]));
 
-  const youtubeTags = tagSets[tagIndex];
+    const keywordHashtags = keywordTags.map((k) => `#${k.replace(/\\s+/g, '')}`);
+    const themeHashtags = (themeConfig.hashtags || []).map((h) => (h.startsWith('#') ? h : `#${h}`));
+    const combinedHashtags = Array.from(new Set([...themeHashtags, ...keywordHashtags]));
+    const hashtagLine = combinedHashtags.length ? `\\n\\n${combinedHashtags.join(' ')}` : '';
 
-  return {
-    youtubeTitle,
-    youtubeDescription,
-    youtubeTags,
-    instagramCaption,
-    tiktokCaption
-  };
+    const emojiPrefix = (themeConfig.emojis || []).slice(0, 3).join(' ');
+
+    const instagramCaption = `${emojiPrefix ? emojiPrefix + ' ' : ''}${captionPoolIG[instaIndex].replace(/{style}/g, style)}${hashtagLine}`;
+    const tiktokCaption = `${emojiPrefix ? emojiPrefix + ' ' : ''}${captionPoolTT[tiktokIndex].replace(/{style}/g, style)}${hashtagLine}`;
+
+    return {
+      youtubeTitle,
+      youtubeDescription,
+      youtubeTags,
+      instagramCaption,
+      tiktokCaption
+    };
+  }
+
+  const variantCount = Math.max(1, variants || 1);
+  const variantList = [];
+  for (let i = 0; i < variantCount; i += 1) {
+    variantList.push(buildVariant(seed + i * 1000));
+  }
+
+  const selected = variantList[0];
+
+  if (variantCount > 1) {
+    return {
+      ...selected,
+      variants: variantList,
+      selected
+    };
+  }
+
+  return selected;
 }
 
 module.exports = {
