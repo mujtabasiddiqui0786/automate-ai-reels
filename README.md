@@ -10,6 +10,7 @@ A production-ready Node.js backend system for generating and uploading satisfyin
 - 🎨 **Deterministic Generation**: Seed-based randomization for reproducible results
 - 🚀 **Zero Dependencies**: Uses only Node.js built-in modules
 - 💰 **Cost-Effective**: Optimized for free tiers and minimal resource usage
+- 🤖 **AI Prompting (Phase 3)**: Optional Gemini-driven prompt generation for new video ideas
 
 ## Prerequisites
 
@@ -112,6 +113,14 @@ See `.env.example` for all available configuration options.
 3. Get Client Key and Client Secret
 4. Generate access token with video upload permissions
 
+### AI (Gemini Nano)
+
+- `GEMINI_API_KEY` - Google Generative AI API key (free tier)
+- `GEMINI_MODEL` - e.g., `gemini-1.5-flash`
+- `USE_AI_GENERATION` - set to `true` to enable AI prompt generation
+- `AI_PROMPT_CACHE_SIZE` - optional cache size (default 20)
+- `AI_PROVIDER` - defaults to `gemini`
+
 ## API Endpoints
 
 ### POST /generate
@@ -124,6 +133,14 @@ Generate a new satisfying loop video.
   "style": "gradient",
   "durationSeconds": 25,
   "seed": 12345
+}
+```
+
+To use AI-generated prompts:
+```json
+{
+  "useAI": true,
+  "durationSeconds": 25
 }
 ```
 
@@ -227,6 +244,33 @@ Upload or export a video to TikTok.
   "message": "Video exported to TikTok directory. Upload manually or configure TikTok API credentials."
 }
 ```
+
+### POST /pipeline/generate-upload
+
+Run generation + uploads (supports AI prompts).
+
+```json
+{
+  "generation": {
+    "useAI": true,
+    "durationSeconds": 25
+  },
+  "platforms": {
+    "youtube": { "enabled": true },
+    "instagram": { "enabled": true },
+    "tiktok": { "enabled": true }
+  },
+  "trackJob": true
+}
+```
+
+### AI Endpoints
+
+- `POST /ai/generate-prompt` — get a fresh AI prompt and suggested parameters
+- `POST /ai/improve-prompt` — improve on a previous prompt (pass `{ "last": { prompt, id } }`)
+- `GET /ai/prompts` — list stored prompts (from `prompts.json`)
+
+AI endpoints require `USE_AI_GENERATION=true` and a valid `GEMINI_API_KEY`.
 
 ### GET /videos/*
 

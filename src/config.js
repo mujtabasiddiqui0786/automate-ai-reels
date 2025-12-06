@@ -45,6 +45,15 @@ function loadConfig() {
       staticBaseUrl: process.env.STATIC_BASE_URL || 'http://localhost:3000'
     },
 
+    // AI / Gemini
+    ai: {
+      enabled: process.env.USE_AI_GENERATION === 'true',
+      provider: process.env.AI_PROVIDER || 'gemini',
+      geminiApiKey: process.env.GEMINI_API_KEY || '',
+      geminiModel: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
+      promptCacheSize: parseInt(process.env.AI_PROMPT_CACHE_SIZE || '20', 10)
+    },
+
     // Server configuration
     server: {
       port: parseInt(process.env.PORT || '3000', 10),

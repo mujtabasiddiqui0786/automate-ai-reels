@@ -18,6 +18,8 @@ const { uploadTikTok } = require('./upload/tiktok');
 const { createError, sendErrorResponse } = require('./utils/errors');
 const { createJob, updateJobStatus, appendJobStep, getJob } = require('./jobs/store');
 const { LOGS_DIR } = require('./utils/log');
+const { generateVideoPrompt, generateVideoParameters, generateIterativePrompt } = require('./ai/gemini');
+const { loadPrompts, savePrompt, getRecentPrompts, getUnusedVariations, markPromptUsed } = require('./ai/prompts');
 
 /**
  * Parses JSON request body
@@ -48,6 +50,47 @@ function parseJSONBody(req) {
       reject(new Error(`Request error: ${error.message}`));
     });
   });
+}
+
+async function handleAIGeneratePrompt(res, body) {
+  try {
+    if (!config.ai.enabled) {
+      sendError(res, 400, 'AI generation disabled', 'AI_DISABLED');
+      return;
+    }
+    const recent = getRecentPrompts(5);
+    const prompt = await generateVideoPrompt({ recentPrompts: recent });
+    savePrompt(prompt, { status: 'new' });
+
+    const params = generateVideoParameters(prompt.prompt, Date.now());
+    sendJSON(res, 200, {
+      prompt,
+      parameters: params
+    });
+  } catch (error) {
+    sendErrorResponse(res, createError('AI_PROMPT_FAILED', error.message || 'Failed to generate AI prompt'), 500);
+  }
+}
+
+function handleListPrompts(res) {
+  const prompts = loadPrompts();
+  sendJSON(res, 200, { prompts });
+}
+
+async function handleAIImprovePrompt(res, body) {
+  try {
+    if (!config.ai.enabled) {
+      sendError(res, 400, 'AI generation disabled', 'AI_DISABLED');
+      return;
+    }
+    const recent = getRecentPrompts(5);
+    const improved = await generateIterativePrompt(body.last || {}, recent);
+    savePrompt(improved, { status: 'new' });
+    const params = generateVideoParameters(improved.prompt, Date.now());
+    sendJSON(res, 200, { prompt: improved, parameters: params });
+  } catch (error) {
+    sendErrorResponse(res, createError('AI_IMPROVE_FAILED', error.message || 'Failed to improve prompt'), 500);
+  }
 }
 
 /**
@@ -110,6 +153,34 @@ async function handleCleanup(res, body) {
     return;
   }
 
+  // Route: POST /ai/generate-prompt
+  if (method === 'POST' && pathname === '/ai/generate-prompt') {
+    try {
+      const body = await parseJSONBody(req);
+      await handleAIGeneratePrompt(res, body);
+    } catch (error) {
+      sendError(res, 400, error.message || 'Invalid request');
+    }
+    return;
+  }
+
+  // Route: GET /ai/prompts
+  if (method === 'GET' && pathname === '/ai/prompts') {
+    handleListPrompts(res);
+    return;
+  }
+
+  // Route: POST /ai/improve-prompt
+  if (method === 'POST' && pathname === '/ai/improve-prompt') {
+    try {
+      const body = await parseJSONBody(req);
+      await handleAIImprovePrompt(res, body);
+    } catch (error) {
+      sendError(res, 400, error.message || 'Invalid request');
+    }
+    return;
+  }
+
   const retentionDays = parseInt(process.env.VIDEO_RETENTION_DAYS || '30', 10);
   const outputs = [];
   outputs.push(cleanupFiles(config.paths.outputVideoDir, retentionDays));
@@ -162,27 +233,54 @@ async function handlePipelineGenerateUpload(res, body) {
 
   const results = {};
   const { generation = {}, platforms = {}, metadata: metaInput = {}, callbackUrl } = body;
+  const useAI = config.ai.enabled && (generation.useAI || generation.useAi || body.useAI);
+  let aiPrompt = null;
 
   try {
     appendJobStep(job.id, { name: 'generateLoop', status: 'running' });
-    const videoResult = await generateLoop({
+    let genOptions = {
       style: generation.style || 'default',
       durationSeconds: generation.durationSeconds || 25,
       seed: generation.seed || Date.now(),
       perfectLoop: !!generation.perfectLoop,
       fadeAudio: !!generation.fadeAudio
-    });
+    };
+
+    if (useAI) {
+      const recent = getRecentPrompts(5);
+      const unused = getUnusedVariations();
+      if (unused.length > 0) {
+        aiPrompt = unused[0];
+      } else {
+        aiPrompt = await generateVideoPrompt({ recentPrompts: recent });
+        savePrompt(aiPrompt, { status: 'new' });
+      }
+      const aiParams = generateVideoParameters(aiPrompt.prompt, genOptions.seed);
+      genOptions = { ...genOptions, ...aiParams };
+    }
+
+    const videoResult = await generateLoop(genOptions);
     results.video = videoResult;
     appendJobStep(job.id, { name: 'generateLoop', status: 'success', finishedAt: new Date().toISOString() });
 
     const metadata = generateMetadata({
-      style: generation.style || 'default',
-      seed: generation.seed || Date.now(),
+      style: genOptions.style || 'default',
+      seed: genOptions.seed || Date.now(),
       theme: metaInput.theme,
       keywords: metaInput.keywords,
       variants: metaInput.variants
     });
     results.metadata = metadata;
+
+    if (aiPrompt) {
+      markPromptUsed(aiPrompt.id, {
+        filePath: videoResult.filePath,
+        publicUrl: videoResult.publicUrl,
+        thumbnailUrl: videoResult.thumbnailUrl,
+        seed: genOptions.seed
+      });
+      results.aiPrompt = aiPrompt;
+    }
 
     if (platforms.youtube && platforms.youtube.enabled) {
       appendJobStep(job.id, { name: 'uploadYouTube', status: 'running' });
@@ -326,16 +424,40 @@ async function handleGenerate(res, body, trackJob) {
   let job = null;
   try {
     const {
-      style = 'default',
-      durationSeconds = 25,
+      style: styleInput = 'default',
+      durationSeconds: durationInput = 25,
       seed = Date.now(),
-      perfectLoop = false,
-      fadeAudio = false
+      perfectLoop: perfectLoopInput = false,
+      fadeAudio: fadeAudioInput = false
     } = body;
+
+    let style = styleInput;
+    let durationSeconds = durationInput;
+    let perfectLoop = perfectLoopInput;
+    let fadeAudio = fadeAudioInput;
 
     if (trackJob) {
       job = createJob('generate', body);
       updateJobStatus(job.id, { status: 'running' });
+    }
+
+    // AI prompt generation if enabled
+    let aiPrompt = null;
+    if (config.ai.enabled && (body.useAI || body.useAi)) {
+      const recent = getRecentPrompts(5);
+      const unused = getUnusedVariations();
+      if (unused.length > 0) {
+        aiPrompt = unused[0];
+      } else {
+        aiPrompt = await generateVideoPrompt({ recentPrompts: recent });
+        savePrompt(aiPrompt, { status: 'new' });
+      }
+      const aiParams = generateVideoParameters(aiPrompt.prompt, seed);
+      // merge AI params into generation options
+      if (aiParams.style) style = aiParams.style;
+      if (aiParams.durationSeconds) durationSeconds = aiParams.durationSeconds;
+      if (aiParams.perfectLoop != null) perfectLoop = aiParams.perfectLoop;
+      if (aiParams.fadeAudio != null) fadeAudio = aiParams.fadeAudio;
     }
 
     // Generate video
@@ -356,6 +478,15 @@ async function handleGenerate(res, body, trackJob) {
       keywords: body.keywords,
       variants: body.variants
     });
+
+    if (aiPrompt) {
+      markPromptUsed(aiPrompt.id, {
+        filePath: videoResult.filePath,
+        publicUrl: videoResult.publicUrl,
+        thumbnailUrl: videoResult.thumbnailUrl,
+        seed
+      });
+    }
 
     if (job) {
       updateJobStatus(job.id, {
